@@ -32,6 +32,38 @@ const (
 
 var version = "dev"
 
+var defaultModelMapping = map[string]string{
+	"claude-opus":   "deepseek-v4-pro",
+	"claude-sonnet": "kimi-k2.6",
+	"claude-haiku":  "qwen3.5-plus",
+}
+
+func modelMappingFile() string { return filepath.Join(configDir(), "model-mapping.json") }
+
+func loadModelMapping() map[string]string {
+	path := modelMappingFile()
+	if b, err := os.ReadFile(path); err == nil {
+		var m map[string]string
+		if json.Unmarshal(b, &m) == nil && len(m) > 0 {
+			return m
+		}
+	}
+	return defaultModelMapping
+}
+
+func resolveClaudeModel(model string) string {
+	if mapped, ok := loadModelMapping()[model]; ok {
+		return mapped
+	}
+	mapping := loadModelMapping()
+	for prefix, target := range mapping {
+		if strings.HasPrefix(model, prefix+"-") {
+			return target
+		}
+	}
+	return model
+}
+
 type Config struct {
 	APIKey string `json:"api_key"`
 	Host   string `json:"host"`
@@ -156,7 +188,7 @@ var reasoningContentCache = struct {
 
 func main() {
 	root := &cobra.Command{Use: appName, Short: "Run Claude Code with OpenCode Go", Version: version}
-	root.AddCommand(setupCmd(), listCmd(), launchCmd(), serveCmd(), stopCmd(), statusCmd())
+	root.AddCommand(setupCmd(), listCmd(), launchCmd(), serveCmd(), stopCmd(), statusCmd(), claudeModelsCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -236,6 +268,7 @@ func launchCmd() *cobra.Command {
 	var model string
 	var yes bool
 	var codexConfigOnly bool
+	var claudeConfigOnly bool
 	cmd := &cobra.Command{Use: "launch", Short: "Launch tools through ocgo"}
 	claude := &cobra.Command{Use: "claude [-- claude args...]", Short: "Launch Claude Code through OpenCode Go", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -243,6 +276,13 @@ func launchCmd() *cobra.Command {
 			return err
 		}
 		base := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
+		if err := ensureClaudeConfig(base, model); err != nil {
+			return fmt.Errorf("failed to configure claude: %w", err)
+		}
+		if claudeConfigOnly {
+			fmt.Printf("Configured Claude Code settings in %s\n", claudeSettingsFile())
+			return nil
+		}
 		serverCmd, err := startLaunchServer(base)
 		if err != nil {
 			return err
@@ -268,6 +308,7 @@ func launchCmd() *cobra.Command {
 	}}
 	claude.Flags().StringVar(&model, "model", "", "OpenCode Go model ID")
 	claude.Flags().BoolVar(&yes, "yes", false, "Allow Claude Code to skip permission prompts")
+	claude.Flags().BoolVar(&claudeConfigOnly, "config", false, "Configure Claude Code settings without launching")
 	codex := &cobra.Command{Use: "codex [-- codex args...]", Short: "Launch Codex CLI through OpenCode Go", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -370,6 +411,30 @@ func statusCmd() *cobra.Command {
 		}
 		fmt.Printf("Proxy is running on %s:%d (no ocgo PID file)\n", cfg.Host, cfg.Port)
 	}}
+}
+
+func claudeModelsCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "claude-models", Short: "Manage Claude Code model mapping"}
+	mapping := &cobra.Command{Use: "mapping", Short: "Show Claude Code model mapping", Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("Claude Code model mapping:")
+		for k, v := range loadModelMapping() {
+			fmt.Printf("  %s -> %s\n", k, v)
+		}
+	}}
+	setCmd := &cobra.Command{Use: "set <claude-model> <opencode-go-model>", Short: "Set model mapping", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		m := loadModelMapping()
+		m[args[0]] = args[1]
+		os.MkdirAll(configDir(), 0755)
+		b, _ := json.MarshalIndent(m, "", "  ")
+		if err := os.WriteFile(modelMappingFile(), append(b, '\n'), 0644); err != nil {
+			return err
+		}
+		fmt.Printf("Set %s -> %s\n", args[0], args[1])
+		return nil
+	}}
+	mapping.AddCommand(setCmd)
+	cmd.AddCommand(mapping)
+	return cmd
 }
 
 func runServer(cfg Config) error {
@@ -589,6 +654,9 @@ func forwardAnthropic(ctx context.Context, cfg Config, ar AnthropicRequest) (*ht
 func ensureAnthropicRequestDefaults(ar *AnthropicRequest) {
 	ar.Model = modelID(ar.Model)
 	if ar.Model == "" || strings.HasPrefix(ar.Model, "claude-") {
+		ar.Model = resolveClaudeModel(ar.Model)
+	}
+	if ar.Model == "" || strings.HasPrefix(ar.Model, "claude-") {
 		ar.Model = "kimi-k2.6"
 	}
 	if ar.MaxTokens == 0 {
@@ -794,6 +862,9 @@ func stripRawChatImageDetails(req map[string]any) bool {
 
 func convertRequest(ar AnthropicRequest) OAIRequest {
 	model := ar.Model
+	if model == "" || strings.HasPrefix(model, "claude-") {
+		model = resolveClaudeModel(model)
+	}
 	if model == "" || strings.HasPrefix(model, "claude-") {
 		model = "kimi-k2.6"
 	}
@@ -2190,6 +2261,58 @@ func codexProfileConfigFile() string {
 func codexModelCatalogFile() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".codex", "ocgo-models.json")
+}
+
+func claudeSettingsFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "settings.json")
+}
+
+func ensureClaudeConfig(base, model string) error {
+	path := claudeSettingsFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+
+	var settings map[string]any
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &settings)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if settings == nil {
+		settings = map[string]any{}
+	}
+
+	env, ok := settings["env"].(map[string]any)
+	if !ok {
+		env = map[string]any{}
+		settings["env"] = env
+	}
+
+	env["ANTHROPIC_BASE_URL"] = strings.TrimRight(base, "/")
+	env["ANTHROPIC_AUTH_TOKEN"] = "unused"
+	// Always set model-related vars to override any previous config
+	if model != "" {
+		env["ANTHROPIC_MODEL"] = model
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+		env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+	} else {
+		// Clear any leftover model-specific vars when no model specified
+		delete(env, "ANTHROPIC_MODEL")
+		delete(env, "ANTHROPIC_DEFAULT_OPUS_MODEL")
+		delete(env, "ANTHROPIC_DEFAULT_SONNET_MODEL")
+		delete(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+		delete(env, "ANTHROPIC_SMALL_FAST_MODEL")
+	}
+
+	b, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0644)
 }
 
 func ensureCodexConfig(base string) error {
