@@ -38,7 +38,7 @@ var defaultModelMapping = map[string]string{
 	"claude-haiku":  "qwen3.5-plus",
 }
 
-func modelMappingFile() string { return filepath.Join(configDir(), "model-mapping.json") }
+var modelMappingFile = func() string { return filepath.Join(configDir(), "model-mapping.json") }
 
 func loadModelMapping() map[string]string {
 	path := modelMappingFile()
@@ -2263,7 +2263,7 @@ func codexModelCatalogFile() string {
 	return filepath.Join(home, ".codex", "ocgo-models.json")
 }
 
-func claudeSettingsFile() string {
+var claudeSettingsFile = func() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude", "settings.json")
 }
@@ -2300,12 +2300,17 @@ func ensureClaudeConfig(base, model string) error {
 		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
 		env["ANTHROPIC_SMALL_FAST_MODEL"] = model
 	} else {
-		// Clear any leftover model-specific vars when no model specified
 		delete(env, "ANTHROPIC_MODEL")
-		delete(env, "ANTHROPIC_DEFAULT_OPUS_MODEL")
-		delete(env, "ANTHROPIC_DEFAULT_SONNET_MODEL")
-		delete(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
-		delete(env, "ANTHROPIC_SMALL_FAST_MODEL")
+		// Write model mapping from config file (or defaults)
+		mapping := loadModelMapping()
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = mapping["claude-opus"]
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = mapping["claude-sonnet"]
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = mapping["claude-haiku"]
+		env["ANTHROPIC_SMALL_FAST_MODEL"] = mapping["claude-haiku"]
+	}
+	// Ensure top-level model is set to opusplan if not present
+	if _, ok := settings["model"]; !ok {
+		settings["model"] = "opusplan"
 	}
 
 	b, err := json.MarshalIndent(settings, "", "  ")

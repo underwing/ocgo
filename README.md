@@ -121,6 +121,12 @@ Allow Claude Code to skip permission prompts:
 ocgo launch claude --yes
 ```
 
+Configure Claude Code settings without launching it:
+
+```bash
+ocgo launch claude --config
+```
+
 When `ocgo launch claude` starts Claude Code, it sets:
 
 ```bash
@@ -134,6 +140,17 @@ When `--model` is provided, it also sets:
 ANTHROPIC_MODEL=<model>
 ANTHROPIC_SMALL_FAST_MODEL=<model>
 ```
+
+When no `--model` is provided, `ocgo` reads the model mapping and sets default models in Claude Code settings:
+
+```bash
+ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
+ANTHROPIC_DEFAULT_SONNET_MODEL=kimi-k2.6
+ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.5-plus
+ANTHROPIC_SMALL_FAST_MODEL=qwen3.5-plus
+```
+
+It also ensures the top-level `"model": "opusplan"` is set in `~/.claude/settings.json`.
 
 If Claude Code requests a Claude model name or does not provide a model, `ocgo` defaults the upstream OpenCode Go model to `kimi-k2.6`.
 
@@ -156,6 +173,30 @@ Pass arguments through to Codex after `--`:
 ```bash
 ocgo launch codex --model kimi-k2.6 -- --sandbox workspace-write
 ```
+
+### Manage Claude Code model mapping
+
+`ocgo` maintains a mapping between Claude Code model names and OpenCode Go model IDs. The default mapping is:
+
+| Claude model | OpenCode Go model |
+|---|---|
+| `claude-opus` | `deepseek-v4-pro` |
+| `claude-sonnet` | `kimi-k2.6` |
+| `claude-haiku` | `qwen3.5-plus` |
+
+View the current mapping:
+
+```bash
+ocgo claude-models mapping
+```
+
+Customize a mapping entry:
+
+```bash
+ocgo claude-models mapping set claude-opus glm-5.1
+```
+
+Mappings are saved to `~/.config/ocgo/model-mapping.json`.
 
 Configure Codex without launching it:
 

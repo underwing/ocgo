@@ -570,3 +570,246 @@ func TestStreamResponsesForwardsToolCalls(t *testing.T) {
 		t.Fatalf("missing cached reasoning content: %+v", messages[0])
 	}
 }
+
+func TestEnsureClaudeConfigWithModel(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	// override claudeSettingsFile for test
+	claudeSettingsFile = func() string { return settingsPath }
+	defer func() { claudeSettingsFile = func() string { return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json") } }()
+
+	if err := ensureClaudeConfig("http://127.0.0.1:3456", "glm-5.1"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := settings["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing env: %+v", settings)
+	}
+	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:3456" {
+		t.Fatalf("bad base url: %v", env["ANTHROPIC_BASE_URL"])
+	}
+	if env["ANTHROPIC_MODEL"] != "glm-5.1" {
+		t.Fatalf("bad model: %v", env["ANTHROPIC_MODEL"])
+	}
+	if env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "glm-5.1" {
+		t.Fatalf("bad opus: %v", env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings["model"] != "opusplan" {
+		t.Fatalf("model should be opusplan, got %v", settings["model"])
+	}
+}
+
+func TestEnsureClaudeConfigWithoutModelReadsMapping(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	mappingPath := filepath.Join(dir, "model-mapping.json")
+
+	claudeSettingsFile = func() string { return settingsPath }
+	defer func() { claudeSettingsFile = func() string { return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json") } }()
+
+	modelMappingFile = func() string { return mappingPath }
+	defer func() { modelMappingFile = func() string { return filepath.Join(os.Getenv("HOME"), ".config", "ocgo", "model-mapping.json") } }()
+
+	// Write custom mapping
+	customMapping := map[string]string{
+		"claude-opus":   "glm-5.1",
+		"claude-sonnet": "kimi-k2.6",
+		"claude-haiku":  "qwen3.5-plus",
+	}
+	mb, _ := json.MarshalIndent(customMapping, "", "  ")
+	os.WriteFile(mappingPath, append(mb, '\n'), 0644)
+
+	if err := ensureClaudeConfig("http://127.0.0.1:3456", ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := settings["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing env: %+v", settings)
+	}
+	if _, ok := env["ANTHROPIC_MODEL"]; ok {
+		t.Fatalf("ANTHROPIC_MODEL should be deleted")
+	}
+	if env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "glm-5.1" {
+		t.Fatalf("bad opus mapping: %v", env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "kimi-k2.6" {
+		t.Fatalf("bad sonnet mapping: %v", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	}
+	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "qwen3.5-plus" {
+		t.Fatalf("bad haiku mapping: %v", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if env["ANTHROPIC_SMALL_FAST_MODEL"] != "qwen3.5-plus" {
+		t.Fatalf("bad small_fast mapping: %v", env["ANTHROPIC_SMALL_FAST_MODEL"])
+	}
+	if settings["model"] != "opusplan" {
+		t.Fatalf("model should be opusplan, got %v", settings["model"])
+	}
+}
+
+func TestEnsureClaudeConfigPreservesExistingModel(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	claudeSettingsFile = func() string { return settingsPath }
+	defer func() { claudeSettingsFile = func() string { return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json") } }()
+
+	// Pre-existing settings with custom model
+	existing := map[string]any{
+		"model": "custom-plan",
+		"env": map[string]any{
+			"ANTHROPIC_MODEL": "old-model",
+		},
+	}
+	eb, _ := json.Marshal(existing)
+	os.WriteFile(settingsPath, eb, 0644)
+
+	if err := ensureClaudeConfig("http://127.0.0.1:3456", ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["model"] != "custom-plan" {
+		t.Fatalf("existing model should be preserved, got %v", settings["model"])
+	}
+}
+
+func TestResolveClaudeModel(t *testing.T) {
+	dir := t.TempDir()
+	mappingPath := filepath.Join(dir, "model-mapping.json")
+	modelMappingFile = func() string { return mappingPath }
+	defer func() { modelMappingFile = func() string { return filepath.Join(os.Getenv("HOME"), ".config", "ocgo", "model-mapping.json") } }()
+
+	customMapping := map[string]string{
+		"claude-opus":   "deepseek-v4-pro",
+		"claude-sonnet": "kimi-k2.6",
+		"claude-haiku":  "qwen3.5-plus",
+	}
+	mb, _ := json.MarshalIndent(customMapping, "", "  ")
+	os.WriteFile(mappingPath, append(mb, '\n'), 0644)
+
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		// exact match
+		{input: "claude-opus", want: "deepseek-v4-pro"},
+		{input: "claude-sonnet", want: "kimi-k2.6"},
+		{input: "claude-haiku", want: "qwen3.5-plus"},
+		// prefix match (Claude Code sends these)
+		{input: "claude-opus-4-20250514", want: "deepseek-v4-pro"},
+		{input: "claude-sonnet-4-20250514", want: "kimi-k2.6"},
+		{input: "claude-haiku-20250219", want: "qwen3.5-plus"},
+		// unknown passes through
+		{input: "glm-5.1", want: "glm-5.1"},
+		{input: "", want: ""},
+	} {
+		if got := resolveClaudeModel(tc.input); got != tc.want {
+			t.Fatalf("resolveClaudeModel(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestLoadModelMapping(t *testing.T) {
+	dir := t.TempDir()
+	mappingPath := filepath.Join(dir, "model-mapping.json")
+	modelMappingFile = func() string { return mappingPath }
+	defer func() { modelMappingFile = func() string { return filepath.Join(os.Getenv("HOME"), ".config", "ocgo", "model-mapping.json") } }()
+
+	// 1. File does not exist → returns default
+	got := loadModelMapping()
+	if got["claude-opus"] != "deepseek-v4-pro" {
+		t.Fatalf("missing file should return defaults, got %v", got)
+	}
+
+	// 2. Valid custom file
+	custom := map[string]string{"claude-opus": "glm-5.1"}
+	mb, _ := json.MarshalIndent(custom, "", "  ")
+	os.WriteFile(mappingPath, append(mb, '\n'), 0644)
+	got = loadModelMapping()
+	if got["claude-opus"] != "glm-5.1" {
+		t.Fatalf("custom mapping not loaded, got %v", got)
+	}
+	// other keys from default still present? no, file replaces entirely
+	if _, ok := got["claude-sonnet"]; ok {
+		t.Fatalf("custom file should not contain default keys not in file")
+	}
+
+	// 3. Empty file → returns default
+	os.WriteFile(mappingPath, []byte("{}\n"), 0644)
+	got = loadModelMapping()
+	if got["claude-opus"] != "deepseek-v4-pro" {
+		t.Fatalf("empty JSON object should fall back to defaults, got %v", got)
+	}
+
+	// 4. Invalid JSON → returns default
+	os.WriteFile(mappingPath, []byte("not json"), 0644)
+	got = loadModelMapping()
+	if got["claude-opus"] != "deepseek-v4-pro" {
+		t.Fatalf("invalid JSON should fall back to defaults, got %v", got)
+	}
+}
+
+func TestEnsureClaudeConfigOverwritesOldModel(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	claudeSettingsFile = func() string { return settingsPath }
+	defer func() { claudeSettingsFile = func() string { return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json") } }()
+
+	// Pre-existing settings with old model
+	existing := map[string]any{
+		"model": "opusplan",
+		"env": map[string]any{
+			"ANTHROPIC_MODEL":            "old-model",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL": "old-opus",
+			"ANTHROPIC_DEFAULT_SONNET_MODEL": "old-sonnet",
+		},
+	}
+	eb, _ := json.Marshal(existing)
+	os.WriteFile(settingsPath, eb, 0644)
+
+	if err := ensureClaudeConfig("http://127.0.0.1:3456", "glm-5.1"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := settings["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing env: %+v", settings)
+	}
+	if env["ANTHROPIC_MODEL"] != "glm-5.1" {
+		t.Fatalf("old ANTHROPIC_MODEL not overwritten: %v", env["ANTHROPIC_MODEL"])
+	}
+	if env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "glm-5.1" {
+		t.Fatalf("old OPUS_MODEL not overwritten: %v", env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "glm-5.1" {
+		t.Fatalf("old SONNET_MODEL not overwritten: %v", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	}
+}
